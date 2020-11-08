@@ -16,7 +16,21 @@ namespace Mond.VirtualMachine
         private bool _debugSkip;
         private bool _debugAlign;
         private int _debugDepth;
+
+        private ReturnAddress _functionAddress;
+        private MondProgram _program;
+        private byte[] _code;
+        private int _initialCallDepth;
+        private int _initialLocalDepth;
+        private int _initialEvalDepth;
+        private int _ip;
+        private int _errorIp;
+        private Frame _args;
+        private Frame _locals;
+        private bool _initialized;
+
         internal MondDebugger Debugger;
+        internal bool GasLimitExceeded;
 
         public Machine(MondState state)
             : this()
@@ -42,16 +56,16 @@ namespace Mond.VirtualMachine
             }
         }
 
-        public MondValue Load(MondProgram program)
+        public MondValue Load(MondProgram program, MondRuntimeOptions options)
         {
             if (program == null)
                 throw new ArgumentNullException(nameof(program));
 
             var function = new MondValue(new Closure(program, 0, null, null));
-            return Call(function);
+            return Call(function, options);
         }
 
-        public MondValue Call(MondValue function, params MondValue[] arguments)
+        public MondValue Call(MondValue function, MondRuntimeOptions options, params MondValue[] arguments)
         {
             if (function.Type == MondValueType.Object)
             {
@@ -94,24 +108,35 @@ namespace Mond.VirtualMachine
                     throw new NotSupportedException();
             }
 
-            return Run();
+            return Run(options);
         }
 
-        private MondValue Run()
+        internal MondValue Run(MondRuntimeOptions options, bool initializeState = true)
         {
-            var functionAddress = PeekCall();
-            var program = functionAddress.Program;
-            var code = program.Bytecode;
+            GasLimitExceeded = false;
+            if (initializeState)
+            {
+                _functionAddress = PeekCall();
 
-            var initialCallDepth = _callStackSize - 1; // "- 1" to not include values pushed by Call()
-            var initialLocalDepth = _localStackSize - 1;
-            var initialEvalDepth = _evalStackSize;
+                _program = _functionAddress.Program;
+                _code = _program.Bytecode;
 
-            var ip = functionAddress.Address;
-            var errorIp = 0;
+                _initialCallDepth = _callStackSize - 1; // "- 1" to not include values pushed by Call()
+                 _initialLocalDepth = _localStackSize - 1;
+                 _initialEvalDepth = _evalStackSize;
 
-            var args = functionAddress.Arguments;
-            Frame locals = null;
+                _ip = _functionAddress.Address;
+                _errorIp = 0;
+
+                _args = _functionAddress.Arguments;
+                _locals = null;
+                _initialized = true;
+            }
+            if (!_initialized)
+                throw new InvalidOperationException("Mond cannot be continued before being started");
+
+            var gas = options.GasLimit;
+            var useGas = options.GasLimit > 0;
 
             try
             {
@@ -127,18 +152,18 @@ namespace Mond.VirtualMachine
                             (_debugAction == MondDebugAction.StepOver && _debugDepth == 0);
 
                         var shouldBreak =
-                            (_debugAlign && program.DebugInfo == null) ||
-                            (_debugAlign && program.DebugInfo.IsStatementStart(ip)) ||
-                            (Debugger.ShouldBreak(program, ip)) ||
-                            (shouldStopAtStmt && program.DebugInfo != null && program.DebugInfo.IsStatementStart(ip));
+                            (_debugAlign && _program.DebugInfo == null) ||
+                            (_debugAlign && _program.DebugInfo.IsStatementStart(_ip)) ||
+                            (Debugger.ShouldBreak(_program, _ip)) ||
+                            (shouldStopAtStmt && _program.DebugInfo != null && _program.DebugInfo.IsStatementStart(_ip));
 
                         if (!skip && shouldBreak)
-                            DebuggerBreak(program, locals, args, ip, initialCallDepth);
+                            DebuggerBreak(_program, _locals, _args, _ip, _initialCallDepth);
                     }
 
-                    errorIp = ip;
+                    _errorIp = _ip;
 
-                    switch (code[ip++])
+                    switch (_code[_ip++])
                     {
                         #region Stack Manipulation
                         case (int)InstructionType.Dup:
@@ -212,15 +237,15 @@ namespace Mond.VirtualMachine
 
                         case (int)InstructionType.LdNum:
                             {
-                                var numId = ReadInt32(code, ref ip);
-                                Push(program.Numbers[numId]);
+                                var numId = ReadInt32(_code, ref _ip);
+                                Push(_program.Numbers[numId]);
                                 break;
                             }
 
                         case (int)InstructionType.LdStr:
                             {
-                                var strId = ReadInt32(code, ref ip);
-                                Push(program.Strings[strId]);
+                                var strId = ReadInt32(_code, ref _ip);
+                                Push(_program.Strings[strId]);
                                 break;
                             }
 
@@ -234,40 +259,40 @@ namespace Mond.VirtualMachine
                         #region Storables
                         case (int)InstructionType.LdLocF:
                             {
-                                var index = ReadInt32(code, ref ip);
-                                Push(locals.Values[index]);
+                                var index = ReadInt32(_code, ref _ip);
+                                Push(_locals.Values[index]);
                                 break;
                             }
 
                         case (int)InstructionType.StLocF:
                             {
-                                var index = ReadInt32(code, ref ip);
-                                locals.Values[index] = Pop();
+                                var index = ReadInt32(_code, ref _ip);
+                                _locals.Values[index] = Pop();
                                 break;
                             }
 
                         case (int)InstructionType.LdLoc:
                             {
-                                var depth = ReadInt32(code, ref ip);
-                                var index = ReadInt32(code, ref ip);
+                                var depth = ReadInt32(_code, ref _ip);
+                                var index = ReadInt32(_code, ref _ip);
 
                                 if (depth < 0)
-                                    Push(args.Get(-depth, index));
+                                    Push(_args.Get(-depth, index));
                                 else
-                                    Push(locals.Get(depth, index));
+                                    Push(_locals.Get(depth, index));
 
                                 break;
                             }
 
                         case (int)InstructionType.StLoc:
                             {
-                                var depth = ReadInt32(code, ref ip);
-                                var index = ReadInt32(code, ref ip);
+                                var depth = ReadInt32(_code, ref _ip);
+                                var index = ReadInt32(_code, ref _ip);
 
                                 if (depth < 0)
-                                    args.Set(-depth, index, Pop());
+                                    _args.Set(-depth, index, Pop());
                                 else
-                                    locals.Set(depth, index, Pop());
+                                    _locals.Set(depth, index, Pop());
 
                                 break;
                             }
@@ -275,7 +300,7 @@ namespace Mond.VirtualMachine
                         case (int)InstructionType.LdFld:
                             {
                                 var obj = Pop();
-                                Push(obj[program.Strings[ReadInt32(code, ref ip)]]);
+                                Push(obj[_program.Strings[ReadInt32(_code, ref _ip)]]);
                                 break;
                             }
 
@@ -284,7 +309,7 @@ namespace Mond.VirtualMachine
                                 var obj = Pop();
                                 var value = Pop();
 
-                                obj[program.Strings[ReadInt32(code, ref ip)]] = value;
+                                obj[_program.Strings[ReadInt32(_code, ref _ip)]] = value;
                                 break;
                             }
 
@@ -307,12 +332,12 @@ namespace Mond.VirtualMachine
 
                         case (int)InstructionType.LdState:
                             {
-                                var depth = ReadInt32(code, ref ip);
-                                var frame = locals.GetFrame(depth);
-                                locals = frame.StoredFrame;
+                                var depth = ReadInt32(_code, ref _ip);
+                                var frame = _locals.GetFrame(depth);
+                                _locals = frame.StoredFrame;
 
                                 PopLocal();
-                                PushLocal(locals);
+                                PushLocal(_locals);
 
                                 var evals = frame.StoredEvals;
                                 if (evals != null)
@@ -330,9 +355,9 @@ namespace Mond.VirtualMachine
 
                         case (int)InstructionType.StState:
                             {
-                                var depth = ReadInt32(code, ref ip);
-                                var frame = locals.GetFrame(depth);
-                                frame.StoredFrame = locals;
+                                var depth = ReadInt32(_code, ref _ip);
+                                var frame = _locals.GetFrame(depth);
+                                frame.StoredFrame = _locals;
 
                                 var initialEvals = _callStackSize > 0 ? PeekCall().EvalDepth : 0;
                                 var currentEvals = _evalStackSize;
@@ -362,7 +387,7 @@ namespace Mond.VirtualMachine
 
                         case (int)InstructionType.NewArray:
                             {
-                                var count = ReadInt32(code, ref ip);
+                                var count = ReadInt32(_code, ref _ip);
                                 var array = MondValue.Array();
                                 array.ArrayValue.Capacity = count;
 
@@ -562,24 +587,24 @@ namespace Mond.VirtualMachine
                         #region Functions
                         case (int)InstructionType.Closure:
                             {
-                                var address = ReadInt32(code, ref ip);
-                                Push(new MondValue(new Closure(program, address, args, locals)));
+                                var address = ReadInt32(_code, ref _ip);
+                                Push(new MondValue(new Closure(_program, address, _args, _locals)));
                                 break;
                             }
 
                         case (int)InstructionType.Call:
                             {
-                                var argCount = ReadInt32(code, ref ip);
-                                var unpackCount = code[ip++];
+                                var argCount = ReadInt32(_code, ref _ip);
+                                var unpackCount = _code[_ip++];
 
                                 var function = Pop();
 
                                 List<MondValue> unpackedArgs = null;
 
                                 if (unpackCount > 0)
-                                    unpackedArgs = UnpackArgs(code, ref ip, argCount, unpackCount);
+                                    unpackedArgs = UnpackArgs(_code, ref _ip, argCount, unpackCount);
 
-                                var returnAddress = ip;
+                                var returnAddress = _ip;
 
                                 if (function.Type == MondValueType.Object)
                                 {
@@ -611,15 +636,15 @@ namespace Mond.VirtualMachine
 
                                 if (function.Type != MondValueType.Function)
                                 {
-                                    var ldFldBase = ip - 1 - 4 - 1 - 4 - 1;
-                                    if (ldFldBase >= 0 && code[ldFldBase] == (int)InstructionType.LdFld)
+                                    var ldFldBase = _ip - 1 - 4 - 1 - 4 - 1;
+                                    if (ldFldBase >= 0 && _code[ldFldBase] == (int)InstructionType.LdFld)
                                     {
                                         var ldFldIdx = ldFldBase + 1;
-                                        var fieldNameIdx = ReadInt32(code, ref ldFldIdx);
+                                        var fieldNameIdx = ReadInt32(_code, ref ldFldIdx);
 
-                                        if (fieldNameIdx >= 0 && fieldNameIdx < program.Strings.Count)
+                                        if (fieldNameIdx >= 0 && fieldNameIdx < _program.Strings.Count)
                                         {
-                                            var fieldName = program.Strings[fieldNameIdx];
+                                            var fieldName = _program.Strings[fieldNameIdx];
                                             throw new MondRuntimeException(RuntimeError.FieldNotCallable, (string)fieldName);
                                         }
                                     }
@@ -656,14 +681,14 @@ namespace Mond.VirtualMachine
                                 switch (closure.Type)
                                 {
                                     case ClosureType.Mond:
-                                        PushCall(new ReturnAddress(program, returnAddress, argFrame, _evalStackSize));
+                                        PushCall(new ReturnAddress(_program, returnAddress, argFrame, _evalStackSize));
                                         PushLocal(closure.Locals);
 
-                                        program = closure.Program;
-                                        code = program.Bytecode;
-                                        ip = closure.Address;
-                                        args = argFrame;
-                                        locals = closure.Locals;
+                                        _program = closure.Program;
+                                        _code = _program.Bytecode;
+                                        _ip = closure.Address;
+                                        _args = argFrame;
+                                        _locals = closure.Locals;
 
                                         if (Debugger != null)
                                             DebuggerCheckCall();
@@ -684,14 +709,14 @@ namespace Mond.VirtualMachine
 
                         case (int)InstructionType.TailCall:
                             {
-                                var argCount = ReadInt32(code, ref ip);
-                                var address = ReadInt32(code, ref ip);
-                                var unpackCount = code[ip++];
+                                var argCount = ReadInt32(_code, ref _ip);
+                                var address = ReadInt32(_code, ref _ip);
+                                var unpackCount = _code[_ip++];
 
                                 List<MondValue> unpackedArgs = null;
 
                                 if (unpackCount > 0)
-                                    unpackedArgs = UnpackArgs(code, ref ip, argCount, unpackCount);
+                                    unpackedArgs = UnpackArgs(_code, ref _ip, argCount, unpackCount);
 
                                 var returnAddress = PopCall();
                                 var argFrame = returnAddress.Arguments;
@@ -722,19 +747,19 @@ namespace Mond.VirtualMachine
 
                                 PushCall(new ReturnAddress(returnAddress.Program, returnAddress.Address, argFrame, _evalStackSize));
 
-                                ip = address;
+                                _ip = address;
                                 break;
                             }
 
                         case (int)InstructionType.Enter:
                             {
-                                var localCount = ReadInt32(code, ref ip);
+                                var localCount = ReadInt32(_code, ref _ip);
 
                                 var frame = PopLocal();
                                 frame = new Frame(frame?.Depth + 1 ?? 0, frame, localCount);
 
                                 PushLocal(frame);
-                                locals = frame;
+                                _locals = frame;
                                 break;
                             }
 
@@ -744,7 +769,7 @@ namespace Mond.VirtualMachine
                                 frame = frame.Previous;
 
                                 PushLocal(frame);
-                                locals = frame;
+                                _locals = frame;
                                 break;
                             }
 
@@ -753,33 +778,33 @@ namespace Mond.VirtualMachine
                                 var returnAddress = PopCall();
                                 PopLocal();
 
-                                program = returnAddress.Program;
-                                code = program.Bytecode;
-                                ip = returnAddress.Address;
+                                _program = returnAddress.Program;
+                                _code = _program.Bytecode;
+                                _ip = returnAddress.Address;
 
-                                args = _callStackSize > 0 ? PeekCall().Arguments : null;
-                                locals = _localStackSize > 0 ? PeekLocal() : null;
+                                _args = _callStackSize > 0 ? PeekCall().Arguments : null;
+                                _locals = _localStackSize > 0 ? PeekLocal() : null;
 
-                                if (_callStackSize == initialCallDepth)
+                                if (_callStackSize == _initialCallDepth)
                                     return Pop();
 
                                 if (Debugger != null && DebuggerCheckReturn())
-                                    DebuggerBreak(program, locals, args, ip, initialCallDepth);
+                                    DebuggerBreak(_program, _locals, _args, _ip, _initialCallDepth);
 
                                 break;
                             }
 
                         case (int)InstructionType.VarArgs:
                             {
-                                var fixedCount = ReadInt32(code, ref ip);
+                                var fixedCount = ReadInt32(_code, ref _ip);
                                 var varArgs = MondValue.Array();
 
-                                for (var i = fixedCount; i < args.Values.Length; i++)
+                                for (var i = fixedCount; i < _args.Values.Length; i++)
                                 {
-                                    varArgs.ArrayValue.Add(args.Values[i]);
+                                    varArgs.ArrayValue.Add(_args.Values[i]);
                                 }
 
-                                args.Set(args.Depth, fixedCount, varArgs);
+                                _args.Set(_args.Depth, fixedCount, varArgs);
                                 break;
                             }
                         #endregion
@@ -787,57 +812,57 @@ namespace Mond.VirtualMachine
                         #region Branching
                         case (int)InstructionType.Jmp:
                             {
-                                var address = ReadInt32(code, ref ip);
-                                ip = address;
+                                var address = ReadInt32(_code, ref _ip);
+                                _ip = address;
                                 break;
                             }
 
                         case (int)InstructionType.JmpTrueP:
                             {
-                                var address = ReadInt32(code, ref ip);
+                                var address = ReadInt32(_code, ref _ip);
 
                                 if (Peek())
-                                    ip = address;
+                                    _ip = address;
 
                                 break;
                             }
 
                         case (int)InstructionType.JmpFalseP:
                             {
-                                var address = ReadInt32(code, ref ip);
+                                var address = ReadInt32(_code, ref _ip);
 
                                 if (!Peek())
-                                    ip = address;
+                                    _ip = address;
 
                                 break;
                             }
 
                         case (int)InstructionType.JmpTrue:
                             {
-                                var address = ReadInt32(code, ref ip);
+                                var address = ReadInt32(_code, ref _ip);
 
                                 if (Pop())
-                                    ip = address;
+                                    _ip = address;
 
                                 break;
                             }
 
                         case (int)InstructionType.JmpFalse:
                             {
-                                var address = ReadInt32(code, ref ip);
+                                var address = ReadInt32(_code, ref _ip);
 
                                 if (!Pop())
-                                    ip = address;
+                                    _ip = address;
 
                                 break;
                             }
 
                         case (int)InstructionType.JmpTable:
                             {
-                                var start = ReadInt32(code, ref ip);
-                                var count = ReadInt32(code, ref ip);
+                                var start = ReadInt32(_code, ref _ip);
+                                var count = ReadInt32(_code, ref _ip);
 
-                                var endIp = ip + count * 4;
+                                var endIp = _ip + count * 4;
 
                                 var value = Pop();
                                 if (value.Type == MondValueType.Number)
@@ -848,13 +873,13 @@ namespace Mond.VirtualMachine
                                     if (number >= start && number < start + count &&
                                         Math.Abs(number - numberInt) <= double.Epsilon)
                                     {
-                                        ip += (numberInt - start) * 4;
-                                        ip = ReadInt32(code, ref ip);
+                                        _ip += (numberInt - start) * 4;
+                                        _ip = ReadInt32(_code, ref _ip);
                                         break;
                                     }
                                 }
 
-                                ip = endIp;
+                                _ip = endIp;
                                 break;
                             }
                         #endregion
@@ -864,7 +889,7 @@ namespace Mond.VirtualMachine
                                 if (Debugger == null)
                                     break;
 
-                                DebuggerBreak(program, locals, args, ip, initialCallDepth);
+                                DebuggerBreak(_program, _locals, _args, _ip, _initialCallDepth);
 
                                 // we stop for the statement *after* the debugger statement so we
                                 // skip the next break opportunity, otherwise we break twice
@@ -874,6 +899,16 @@ namespace Mond.VirtualMachine
 
                         default:
                             throw new MondRuntimeException(RuntimeError.UnhandledOpcode);
+                    }
+
+                    if (useGas)
+                    {
+                        --gas;
+                        if (gas == 0)
+                        {
+                            GasLimitExceeded = true;
+                            return MondValue.Undefined;
+                        }
                     }
                 }
             }
@@ -946,28 +981,28 @@ namespace Mond.VirtualMachine
                 }
 
                 // first line of the stack trace is where we are running
-                stackTraceBuilder.AppendLine(GetAddressDebugInfo(program, errorIp));
+                stackTraceBuilder.AppendLine(GetAddressDebugInfo(_program, _errorIp));
 
                 // generate stack trace and reset stacks
-                for (var i = Math.Min(_callStackSize - 1, CallStackCapacity - 1); i > initialCallDepth; i--)
+                for (var i = Math.Min(_callStackSize - 1, CallStackCapacity - 1); i > _initialCallDepth; i--)
                 {
                     var returnAddress = _callStack[i];
                     stackTraceBuilder.AppendLine(GetAddressDebugInfo(returnAddress.Program, returnAddress.Address));
                 }
 
-                _callStackSize = initialCallDepth;
+                _callStackSize = _initialCallDepth;
                 for (var i = _callStackSize; i < CallStackCapacity; i++)
                 {
                     _callStack[i] = default(ReturnAddress);
                 }
 
-                _localStackSize = initialLocalDepth;
+                _localStackSize = _initialLocalDepth;
                 for (var i = _localStackSize; i < CallStackCapacity; i++)
                 {
                     _localStack[i] = default(Frame);
                 }
 
-                _evalStackSize = initialEvalDepth;
+                _evalStackSize = _initialEvalDepth;
                 for (var i = _evalStackSize; i < EvalStackCapacity; i++)
                 {
                     _evalStack[i] = default(MondValue);

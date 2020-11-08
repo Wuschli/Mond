@@ -27,6 +27,8 @@ namespace Mond
 
             Options = new MondCompilerOptions();
 
+            RuntimeOptions = new MondRuntimeOptions();
+
             Libraries = new MondLibraryManager
             {
                 new StandardLibraries()
@@ -37,6 +39,11 @@ namespace Mond
         /// Gets or sets the options to use when compiling scripts with <c>Run</c>.
         /// </summary>
         public MondCompilerOptions Options { get; set; }
+
+        /// <summary>
+        /// Gets or sets the options to use when running programs.
+        /// </summary>
+        public MondRuntimeOptions RuntimeOptions { get; set; }
 
         /// <summary>
         /// Gets or sets the libraries to load into the state.
@@ -85,6 +92,11 @@ namespace Mond
         public MondValue Global => _machine.Global;
 
         /// <summary>
+        /// This flag will be set when the vm exited because it ran out of gas.
+        /// </summary>
+        public bool GasLimitExceeded => _machine.GasLimitExceeded;
+
+        /// <summary>
         /// Compiles and runs a Mond script from source code.
         /// </summary>
         public MondValue Run(string sourceCode, string fileName = null)
@@ -109,7 +121,7 @@ namespace Mond
         {
             EnsureLibrariesLoaded();
 
-            return _machine.Load(program);
+            return _machine.Load(program, RuntimeOptions);
         }
 
         /// <summary>
@@ -117,7 +129,16 @@ namespace Mond
         /// </summary>
         public MondValue Call(MondValue function, params MondValue[] arguments)
         {
-            return _machine.Call(function, arguments);
+            return _machine.Call(function, RuntimeOptions, arguments);
+        }
+
+        /// <summary>
+        /// Continue execution of the last run.
+        /// </summary>
+        /// <returns></returns>
+        public MondValue Continue()
+        {
+            return _machine.Run(RuntimeOptions, false);
         }
 
         /// <summary>
