@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using Mond.Compiler;
 using Mond.Debugger;
+using Mond.VirtualMachine.Persistence;
 
 namespace Mond.VirtualMachine
 {
@@ -17,20 +18,10 @@ namespace Mond.VirtualMachine
         private bool _debugAlign;
         private int _debugDepth;
 
-        private ReturnAddress _functionAddress;
-        private MondProgram _program;
-        private byte[] _code;
-        private int _initialCallDepth;
-        private int _initialLocalDepth;
-        private int _initialEvalDepth;
-        private int _ip;
-        private int _errorIp;
-        private Frame _args;
-        private Frame _locals;
-        private bool _initialized;
-
         internal MondDebugger Debugger;
         internal bool GasLimitExceeded;
+
+        public MachineState MachineState { get; set; }
 
         public Machine(MondState state)
             : this()
@@ -116,23 +107,10 @@ namespace Mond.VirtualMachine
             GasLimitExceeded = false;
             if (initializeState)
             {
-                _functionAddress = PeekCall();
-
-                _program = _functionAddress.Program;
-                _code = _program.Bytecode;
-
-                _initialCallDepth = _callStackSize - 1; // "- 1" to not include values pushed by Call()
-                 _initialLocalDepth = _localStackSize - 1;
-                 _initialEvalDepth = _evalStackSize;
-
-                _ip = _functionAddress.Address;
-                _errorIp = 0;
-
-                _args = _functionAddress.Arguments;
-                _locals = null;
-                _initialized = true;
+                MachineState = new MachineState(PeekCall(), _callStackSize, _localStackSize, _evalStackSize);
             }
-            if (!_initialized)
+
+            if (MachineState == null)
                 throw new InvalidOperationException("Mond cannot be continued before being started");
 
             var gas = options.GasLimit;
@@ -152,750 +130,766 @@ namespace Mond.VirtualMachine
                             (_debugAction == MondDebugAction.StepOver && _debugDepth == 0);
 
                         var shouldBreak =
-                            (_debugAlign && _program.DebugInfo == null) ||
-                            (_debugAlign && _program.DebugInfo.IsStatementStart(_ip)) ||
-                            (Debugger.ShouldBreak(_program, _ip)) ||
-                            (shouldStopAtStmt && _program.DebugInfo != null && _program.DebugInfo.IsStatementStart(_ip));
+                            (_debugAlign && MachineState.Program.DebugInfo == null) ||
+                            (_debugAlign && MachineState.Program.DebugInfo.IsStatementStart(MachineState.Ip)) ||
+                            (Debugger.ShouldBreak(MachineState.Program, MachineState.Ip)) ||
+                            (shouldStopAtStmt && MachineState.Program.DebugInfo != null && MachineState.Program.DebugInfo.IsStatementStart(MachineState.Ip));
 
                         if (!skip && shouldBreak)
-                            DebuggerBreak(_program, _locals, _args, _ip, _initialCallDepth);
+                            DebuggerBreak(MachineState.Program, MachineState.Locals, MachineState.Args, MachineState.Ip, MachineState.InitialCallDepth);
                     }
 
-                    _errorIp = _ip;
+                    MachineState.ErrorIp = MachineState.Ip;
 
-                    switch (_code[_ip++])
+                    switch (MachineState.Code[MachineState.Ip++])
                     {
                         #region Stack Manipulation
-                        case (int)InstructionType.Dup:
-                            {
-                                Push(Peek());
-                                break;
-                            }
 
-                        case (int)InstructionType.Dup2:
-                            {
-                                var value2 = Pop();
-                                var value1 = Pop();
-                                Push(value1);
-                                Push(value2);
-                                Push(value1);
-                                Push(value2);
-                                break;
-                            }
+                        case (int) InstructionType.Dup:
+                        {
+                            Push(Peek());
+                            break;
+                        }
 
-                        case (int)InstructionType.Drop:
-                            {
-                                Pop();
-                                break;
-                            }
+                        case (int) InstructionType.Dup2:
+                        {
+                            var value2 = Pop();
+                            var value1 = Pop();
+                            Push(value1);
+                            Push(value2);
+                            Push(value1);
+                            Push(value2);
+                            break;
+                        }
 
-                        case (int)InstructionType.Swap:
-                            {
-                                var value1 = Pop();
-                                var value2 = Pop();
-                                Push(value1);
-                                Push(value2);
-                                break;
-                            }
+                        case (int) InstructionType.Drop:
+                        {
+                            Pop();
+                            break;
+                        }
 
-                        case (int)InstructionType.Swap1For2:
-                            {
-                                var one = Pop();
-                                var two2 = Pop();
-                                var two1 = Pop();
-                                Push(one);
-                                Push(two1);
-                                Push(two2);
-                                break;
-                            }
+                        case (int) InstructionType.Swap:
+                        {
+                            var value1 = Pop();
+                            var value2 = Pop();
+                            Push(value1);
+                            Push(value2);
+                            break;
+                        }
+
+                        case (int) InstructionType.Swap1For2:
+                        {
+                            var one = Pop();
+                            var two2 = Pop();
+                            var two1 = Pop();
+                            Push(one);
+                            Push(two1);
+                            Push(two2);
+                            break;
+                        }
+
                         #endregion
 
                         #region Constants
-                        case (int)InstructionType.LdUndef:
-                            {
-                                Push(MondValue.Undefined);
-                                break;
-                            }
 
-                        case (int)InstructionType.LdNull:
-                            {
-                                Push(MondValue.Null);
-                                break;
-                            }
+                        case (int) InstructionType.LdUndef:
+                        {
+                            Push(MondValue.Undefined);
+                            break;
+                        }
 
-                        case (int)InstructionType.LdTrue:
-                            {
-                                Push(MondValue.True);
-                                break;
-                            }
+                        case (int) InstructionType.LdNull:
+                        {
+                            Push(MondValue.Null);
+                            break;
+                        }
 
-                        case (int)InstructionType.LdFalse:
-                            {
-                                Push(MondValue.False);
-                                break;
-                            }
+                        case (int) InstructionType.LdTrue:
+                        {
+                            Push(MondValue.True);
+                            break;
+                        }
 
-                        case (int)InstructionType.LdNum:
-                            {
-                                var numId = ReadInt32(_code, ref _ip);
-                                Push(_program.Numbers[numId]);
-                                break;
-                            }
+                        case (int) InstructionType.LdFalse:
+                        {
+                            Push(MondValue.False);
+                            break;
+                        }
 
-                        case (int)InstructionType.LdStr:
-                            {
-                                var strId = ReadInt32(_code, ref _ip);
-                                Push(_program.Strings[strId]);
-                                break;
-                            }
+                        case (int) InstructionType.LdNum:
+                        {
+                            var numId = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            Push(MachineState.Program.Numbers[numId]);
+                            break;
+                        }
 
-                        case (int)InstructionType.LdGlobal:
-                            {
-                                Push(Global);
-                                break;
-                            }
+                        case (int) InstructionType.LdStr:
+                        {
+                            var strId = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            Push(MachineState.Program.Strings[strId]);
+                            break;
+                        }
+
+                        case (int) InstructionType.LdGlobal:
+                        {
+                            Push(Global);
+                            break;
+                        }
+
                         #endregion
 
                         #region Storables
-                        case (int)InstructionType.LdLocF:
+
+                        case (int) InstructionType.LdLocF:
+                        {
+                            var index = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            Push(MachineState.Locals.Values[index]);
+                            break;
+                        }
+
+                        case (int) InstructionType.StLocF:
+                        {
+                            var index = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            MachineState.Locals.Values[index] = Pop();
+                            break;
+                        }
+
+                        case (int) InstructionType.LdLoc:
+                        {
+                            var depth = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            var index = ReadInt32(MachineState.Code, ref MachineState.Ip);
+
+                            if (depth < 0)
+                                Push(MachineState.Args.Get(-depth, index));
+                            else
+                                Push(MachineState.Locals.Get(depth, index));
+
+                            break;
+                        }
+
+                        case (int) InstructionType.StLoc:
+                        {
+                            var depth = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            var index = ReadInt32(MachineState.Code, ref MachineState.Ip);
+
+                            if (depth < 0)
+                                MachineState.Args.Set(-depth, index, Pop());
+                            else
+                                MachineState.Locals.Set(depth, index, Pop());
+
+                            break;
+                        }
+
+                        case (int) InstructionType.LdFld:
+                        {
+                            var obj = Pop();
+                            Push(obj[MachineState.Program.Strings[ReadInt32(MachineState.Code, ref MachineState.Ip)]]);
+                            break;
+                        }
+
+                        case (int) InstructionType.StFld:
+                        {
+                            var obj = Pop();
+                            var value = Pop();
+
+                            obj[MachineState.Program.Strings[ReadInt32(MachineState.Code, ref MachineState.Ip)]] = value;
+                            break;
+                        }
+
+                        case (int) InstructionType.LdArr:
+                        {
+                            var index = Pop();
+                            var array = Pop();
+                            Push(array[index]);
+                            break;
+                        }
+
+                        case (int) InstructionType.StArr:
+                        {
+                            var index = Pop();
+                            var array = Pop();
+                            var value = Pop();
+                            array[index] = value;
+                            break;
+                        }
+
+                        case (int) InstructionType.LdState:
+                        {
+                            var depth = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            var frame = MachineState.Locals.GetFrame(depth);
+                            MachineState.Locals = frame.StoredFrame;
+
+                            PopLocal();
+                            PushLocal(MachineState.Locals);
+
+                            var evals = frame.StoredEvals;
+                            if (evals != null)
                             {
-                                var index = ReadInt32(_code, ref _ip);
-                                Push(_locals.Values[index]);
-                                break;
-                            }
-
-                        case (int)InstructionType.StLocF:
-                            {
-                                var index = ReadInt32(_code, ref _ip);
-                                _locals.Values[index] = Pop();
-                                break;
-                            }
-
-                        case (int)InstructionType.LdLoc:
-                            {
-                                var depth = ReadInt32(_code, ref _ip);
-                                var index = ReadInt32(_code, ref _ip);
-
-                                if (depth < 0)
-                                    Push(_args.Get(-depth, index));
-                                else
-                                    Push(_locals.Get(depth, index));
-
-                                break;
-                            }
-
-                        case (int)InstructionType.StLoc:
-                            {
-                                var depth = ReadInt32(_code, ref _ip);
-                                var index = ReadInt32(_code, ref _ip);
-
-                                if (depth < 0)
-                                    _args.Set(-depth, index, Pop());
-                                else
-                                    _locals.Set(depth, index, Pop());
-
-                                break;
-                            }
-
-                        case (int)InstructionType.LdFld:
-                            {
-                                var obj = Pop();
-                                Push(obj[_program.Strings[ReadInt32(_code, ref _ip)]]);
-                                break;
-                            }
-
-                        case (int)InstructionType.StFld:
-                            {
-                                var obj = Pop();
-                                var value = Pop();
-
-                                obj[_program.Strings[ReadInt32(_code, ref _ip)]] = value;
-                                break;
-                            }
-
-                        case (int)InstructionType.LdArr:
-                            {
-                                var index = Pop();
-                                var array = Pop();
-                                Push(array[index]);
-                                break;
-                            }
-
-                        case (int)InstructionType.StArr:
-                            {
-                                var index = Pop();
-                                var array = Pop();
-                                var value = Pop();
-                                array[index] = value;
-                                break;
-                            }
-
-                        case (int)InstructionType.LdState:
-                            {
-                                var depth = ReadInt32(_code, ref _ip);
-                                var frame = _locals.GetFrame(depth);
-                                _locals = frame.StoredFrame;
-
-                                PopLocal();
-                                PushLocal(_locals);
-
-                                var evals = frame.StoredEvals;
-                                if (evals != null)
+                                for (var i = evals.Count - 1; i >= 0; i--)
                                 {
-                                    for (var i = evals.Count - 1; i >= 0; i--)
-                                    {
-                                        Push(evals[i]);
-                                    }
-
-                                    evals.Clear();
+                                    Push(evals[i]);
                                 }
 
-                                break;
+                                evals.Clear();
                             }
 
-                        case (int)InstructionType.StState:
+                            break;
+                        }
+
+                        case (int) InstructionType.StState:
+                        {
+                            var depth = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            var frame = MachineState.Locals.GetFrame(depth);
+                            frame.StoredFrame = MachineState.Locals;
+
+                            var initialEvals = _callStackSize > 0 ? PeekCall().EvalDepth : 0;
+                            var currentEvals = _evalStackSize;
+
+                            if (currentEvals != initialEvals)
                             {
-                                var depth = ReadInt32(_code, ref _ip);
-                                var frame = _locals.GetFrame(depth);
-                                frame.StoredFrame = _locals;
+                                var evals = frame.StoredEvals ?? (frame.StoredEvals = new List<MondValue>());
 
-                                var initialEvals = _callStackSize > 0 ? PeekCall().EvalDepth : 0;
-                                var currentEvals = _evalStackSize;
-
-                                if (currentEvals != initialEvals)
+                                while (currentEvals != initialEvals)
                                 {
-                                    var evals = frame.StoredEvals ?? (frame.StoredEvals = new List<MondValue>());
-
-                                    while (currentEvals != initialEvals)
-                                    {
-                                        evals.Add(Pop());
-                                        currentEvals--;
-                                    }
+                                    evals.Add(Pop());
+                                    currentEvals--;
                                 }
-
-                                break;
                             }
+
+                            break;
+                        }
+
                         #endregion
 
                         #region Object Creation
-                        case (int)InstructionType.NewObject:
-                            {
-                                var obj = MondValue.Object(_state);
-                                Push(obj);
-                                break;
-                            }
 
-                        case (int)InstructionType.NewArray:
-                            {
-                                var count = ReadInt32(_code, ref _ip);
-                                var array = MondValue.Array();
-                                array.ArrayValue.Capacity = count;
+                        case (int) InstructionType.NewObject:
+                        {
+                            var obj = MondValue.Object(_state);
+                            Push(obj);
+                            break;
+                        }
 
-                                for (var i = 0; i < count; i++)
-                                    array.ArrayValue.Add(default(MondValue));
+                        case (int) InstructionType.NewArray:
+                        {
+                            var count = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            var array = MondValue.Array();
+                            array.ArrayValue.Capacity = count;
 
-                                Push(array);
-                                break;
-                            }
+                            for (var i = 0; i < count; i++)
+                                array.ArrayValue.Add(default(MondValue));
 
-                        case (int)InstructionType.Slice:
-                            {
-                                var step = Pop();
-                                var end = Pop();
-                                var start = Pop();
-                                var array = Pop();
+                            Push(array);
+                            break;
+                        }
 
-                                Push(array.Slice(start, end, step));
-                                break;
-                            }
+                        case (int) InstructionType.Slice:
+                        {
+                            var step = Pop();
+                            var end = Pop();
+                            var start = Pop();
+                            var array = Pop();
+
+                            Push(array.Slice(start, end, step));
+                            break;
+                        }
+
                         #endregion
 
                         #region Math
-                        case (int)InstructionType.Add:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left + right);
-                                break;
-                            }
 
-                        case (int)InstructionType.Sub:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left - right);
-                                break;
-                            }
+                        case (int) InstructionType.Add:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left + right);
+                            break;
+                        }
 
-                        case (int)InstructionType.Mul:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left * right);
-                                break;
-                            }
+                        case (int) InstructionType.Sub:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left - right);
+                            break;
+                        }
 
-                        case (int)InstructionType.Div:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left / right);
-                                break;
-                            }
+                        case (int) InstructionType.Mul:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left * right);
+                            break;
+                        }
 
-                        case (int)InstructionType.Mod:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left % right);
-                                break;
-                            }
+                        case (int) InstructionType.Div:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left / right);
+                            break;
+                        }
 
-                        case (int)InstructionType.Exp:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left.Pow(right));
-                                break;
-                            }
+                        case (int) InstructionType.Mod:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left % right);
+                            break;
+                        }
 
-                        case (int)InstructionType.BitLShift:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left.LShift(right));
-                                break;
-                            }
+                        case (int) InstructionType.Exp:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left.Pow(right));
+                            break;
+                        }
 
-                        case (int)InstructionType.BitRShift:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left.RShift(right));
-                                break;
-                            }
+                        case (int) InstructionType.BitLShift:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left.LShift(right));
+                            break;
+                        }
 
-                        case (int)InstructionType.BitAnd:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left & right);
-                                break;
-                            }
+                        case (int) InstructionType.BitRShift:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left.RShift(right));
+                            break;
+                        }
 
-                        case (int)InstructionType.BitOr:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left | right);
-                                break;
-                            }
+                        case (int) InstructionType.BitAnd:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left & right);
+                            break;
+                        }
 
-                        case (int)InstructionType.BitXor:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left ^ right);
-                                break;
-                            }
+                        case (int) InstructionType.BitOr:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left | right);
+                            break;
+                        }
 
-                        case (int)InstructionType.Neg:
-                            {
-                                Push(-Pop());
-                                break;
-                            }
+                        case (int) InstructionType.BitXor:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left ^ right);
+                            break;
+                        }
 
-                        case (int)InstructionType.BitNot:
-                            {
-                                Push(~Pop());
-                                break;
-                            }
+                        case (int) InstructionType.Neg:
+                        {
+                            Push(-Pop());
+                            break;
+                        }
+
+                        case (int) InstructionType.BitNot:
+                        {
+                            Push(~Pop());
+                            break;
+                        }
+
                         #endregion
 
                         #region Logic
-                        case (int)InstructionType.Eq:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left == right);
-                                break;
-                            }
 
-                        case (int)InstructionType.Neq:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left != right);
-                                break;
-                            }
+                        case (int) InstructionType.Eq:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left == right);
+                            break;
+                        }
 
-                        case (int)InstructionType.Gt:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left > right);
-                                break;
-                            }
+                        case (int) InstructionType.Neq:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left != right);
+                            break;
+                        }
 
-                        case (int)InstructionType.Gte:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left >= right);
-                                break;
-                            }
+                        case (int) InstructionType.Gt:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left > right);
+                            break;
+                        }
 
-                        case (int)InstructionType.Lt:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left < right);
-                                break;
-                            }
+                        case (int) InstructionType.Gte:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left >= right);
+                            break;
+                        }
 
-                        case (int)InstructionType.Lte:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(left <= right);
-                                break;
-                            }
+                        case (int) InstructionType.Lt:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left < right);
+                            break;
+                        }
 
-                        case (int)InstructionType.Not:
-                            {
-                                Push(!Pop());
-                                break;
-                            }
+                        case (int) InstructionType.Lte:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(left <= right);
+                            break;
+                        }
 
-                        case (int)InstructionType.In:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(right.Contains(left));
-                                break;
-                            }
+                        case (int) InstructionType.Not:
+                        {
+                            Push(!Pop());
+                            break;
+                        }
 
-                        case (int)InstructionType.NotIn:
-                            {
-                                var right = Pop();
-                                var left = Pop();
-                                Push(!right.Contains(left));
-                                break;
-                            }
+                        case (int) InstructionType.In:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(right.Contains(left));
+                            break;
+                        }
+
+                        case (int) InstructionType.NotIn:
+                        {
+                            var right = Pop();
+                            var left = Pop();
+                            Push(!right.Contains(left));
+                            break;
+                        }
+
                         #endregion
 
                         #region Functions
-                        case (int)InstructionType.Closure:
+
+                        case (int) InstructionType.Closure:
+                        {
+                            var address = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            Push(new MondValue(new Closure(MachineState.Program, address, MachineState.Args, MachineState.Locals)));
+                            break;
+                        }
+
+                        case (int) InstructionType.Call:
+                        {
+                            var argCount = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            var unpackCount = MachineState.Code[MachineState.Ip++];
+
+                            var function = Pop();
+
+                            List<MondValue> unpackedArgs = null;
+
+                            if (unpackCount > 0)
+                                unpackedArgs = UnpackArgs(MachineState.Code, ref MachineState.Ip, argCount, unpackCount);
+
+                            var returnAddress = MachineState.Ip;
+
+                            if (function.Type == MondValueType.Object)
                             {
-                                var address = ReadInt32(_code, ref _ip);
-                                Push(new MondValue(new Closure(_program, address, _args, _locals)));
-                                break;
-                            }
+                                MondValue[] argArr;
 
-                        case (int)InstructionType.Call:
-                            {
-                                var argCount = ReadInt32(_code, ref _ip);
-                                var unpackCount = _code[_ip++];
-
-                                var function = Pop();
-
-                                List<MondValue> unpackedArgs = null;
-
-                                if (unpackCount > 0)
-                                    unpackedArgs = UnpackArgs(_code, ref _ip, argCount, unpackCount);
-
-                                var returnAddress = _ip;
-
-                                if (function.Type == MondValueType.Object)
-                                {
-                                    MondValue[] argArr;
-
-                                    if (unpackedArgs == null)
-                                    {
-                                        argArr = new MondValue[argCount + 1];
-
-                                        for (var i = argCount; i >= 1; i--)
-                                        {
-                                            argArr[i] = Pop();
-                                        }
-
-                                        argArr[0] = function;
-                                    }
-                                    else
-                                    {
-                                        unpackedArgs.Insert(0, function);
-                                        argArr = unpackedArgs.ToArray();
-                                    }
-
-                                    if (function.TryDispatch("__call", out var result, argArr))
-                                    {
-                                        Push(result);
-                                        break;
-                                    }
-                                }
-
-                                if (function.Type != MondValueType.Function)
-                                {
-                                    var ldFldBase = _ip - 1 - 4 - 1 - 4 - 1;
-                                    if (ldFldBase >= 0 && _code[ldFldBase] == (int)InstructionType.LdFld)
-                                    {
-                                        var ldFldIdx = ldFldBase + 1;
-                                        var fieldNameIdx = ReadInt32(_code, ref ldFldIdx);
-
-                                        if (fieldNameIdx >= 0 && fieldNameIdx < _program.Strings.Count)
-                                        {
-                                            var fieldName = _program.Strings[fieldNameIdx];
-                                            throw new MondRuntimeException(RuntimeError.FieldNotCallable, (string)fieldName);
-                                        }
-                                    }
-
-                                    throw new MondRuntimeException(RuntimeError.ValueNotCallable, function.Type.GetName());
-                                }
-
-                                var closure = function.FunctionValue;
-
-                                var argFrame = function.FunctionValue.Arguments;
-                                var argFrameCount = unpackedArgs?.Count ?? argCount;
-
-                                if (argFrame == null)
-                                    argFrame = new Frame(1, null, argFrameCount);
-                                else
-                                    argFrame = new Frame(argFrame.Depth + 1, argFrame, argFrameCount);
-
-                                // copy arguments into frame
                                 if (unpackedArgs == null)
                                 {
-                                    for (var i = argFrameCount - 1; i >= 0; i--)
+                                    argArr = new MondValue[argCount + 1];
+
+                                    for (var i = argCount; i >= 1; i--)
                                     {
-                                        argFrame.Values[i] = Pop();
+                                        argArr[i] = Pop();
                                     }
+
+                                    argArr[0] = function;
                                 }
                                 else
                                 {
-                                    for (var i = 0; i < argFrameCount; i++)
+                                    unpackedArgs.Insert(0, function);
+                                    argArr = unpackedArgs.ToArray();
+                                }
+
+                                if (function.TryDispatch("__call", out var result, argArr))
+                                {
+                                    Push(result);
+                                    break;
+                                }
+                            }
+
+                            if (function.Type != MondValueType.Function)
+                            {
+                                var ldFldBase = MachineState.Ip - 1 - 4 - 1 - 4 - 1;
+                                if (ldFldBase >= 0 && MachineState.Code[ldFldBase] == (int) InstructionType.LdFld)
+                                {
+                                    var ldFldIdx = ldFldBase + 1;
+                                    var fieldNameIdx = ReadInt32(MachineState.Code, ref ldFldIdx);
+
+                                    if (fieldNameIdx >= 0 && fieldNameIdx < MachineState.Program.Strings.Count)
                                     {
-                                        argFrame.Values[i] = unpackedArgs[i];
+                                        var fieldName = MachineState.Program.Strings[fieldNameIdx];
+                                        throw new MondRuntimeException(RuntimeError.FieldNotCallable, (string) fieldName);
                                     }
                                 }
 
-                                switch (closure.Type)
+                                throw new MondRuntimeException(RuntimeError.ValueNotCallable, function.Type.GetName());
+                            }
+
+                            var closure = function.FunctionValue;
+
+                            var argFrame = function.FunctionValue.Arguments;
+                            var argFrameCount = unpackedArgs?.Count ?? argCount;
+
+                            if (argFrame == null)
+                                argFrame = new Frame(1, null, argFrameCount);
+                            else
+                                argFrame = new Frame(argFrame.Depth + 1, argFrame, argFrameCount);
+
+                            // copy arguments into frame
+                            if (unpackedArgs == null)
+                            {
+                                for (var i = argFrameCount - 1; i >= 0; i--)
                                 {
-                                    case ClosureType.Mond:
-                                        PushCall(new ReturnAddress(_program, returnAddress, argFrame, _evalStackSize));
-                                        PushLocal(closure.Locals);
-
-                                        _program = closure.Program;
-                                        _code = _program.Bytecode;
-                                        _ip = closure.Address;
-                                        _args = argFrame;
-                                        _locals = closure.Locals;
-
-                                        if (Debugger != null)
-                                            DebuggerCheckCall();
-
-                                        break;
-
-                                    case ClosureType.Native:
-                                        var result = closure.NativeFunction(_state, argFrame.Values);
-                                        Push(result);
-                                        break;
-
-                                    default:
-                                        throw new MondRuntimeException(RuntimeError.UnhandledClosureType);
+                                    argFrame.Values[i] = Pop();
                                 }
-
-                                break;
                             }
-
-                        case (int)InstructionType.TailCall:
+                            else
                             {
-                                var argCount = ReadInt32(_code, ref _ip);
-                                var address = ReadInt32(_code, ref _ip);
-                                var unpackCount = _code[_ip++];
-
-                                List<MondValue> unpackedArgs = null;
-
-                                if (unpackCount > 0)
-                                    unpackedArgs = UnpackArgs(_code, ref _ip, argCount, unpackCount);
-
-                                var returnAddress = PopCall();
-                                var argFrame = returnAddress.Arguments;
-                                var argFrameCount = unpackedArgs?.Count ?? argCount;
-
-                                // make sure we have the correct number of values
-                                if (argFrameCount != argFrame.Values.Length)
-                                    argFrame.Values = new MondValue[argFrameCount];
-
-                                // copy arguments into frame
-                                if (unpackedArgs == null)
+                                for (var i = 0; i < argFrameCount; i++)
                                 {
-                                    for (var i = argFrameCount - 1; i >= 0; i--)
-                                    {
-                                        argFrame.Values[i] = Pop();
-                                    }
+                                    argFrame.Values[i] = unpackedArgs[i];
                                 }
-                                else
+                            }
+
+                            switch (closure.Type)
+                            {
+                                case ClosureType.Mond:
+                                    PushCall(new ReturnAddress(MachineState.Program, returnAddress, argFrame, _evalStackSize));
+                                    PushLocal(closure.Locals);
+
+                                    MachineState.Program = closure.Program;
+                                    MachineState.Code = MachineState.Program.Bytecode;
+                                    MachineState.Ip = closure.Address;
+                                    MachineState.Args = argFrame;
+                                    MachineState.Locals = closure.Locals;
+
+                                    if (Debugger != null)
+                                        DebuggerCheckCall();
+
+                                    break;
+
+                                case ClosureType.Native:
+                                    var result = closure.NativeFunction(_state, argFrame.Values);
+                                    Push(result);
+                                    break;
+
+                                default:
+                                    throw new MondRuntimeException(RuntimeError.UnhandledClosureType);
+                            }
+
+                            break;
+                        }
+
+                        case (int) InstructionType.TailCall:
+                        {
+                            var argCount = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            var address = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            var unpackCount = MachineState.Code[MachineState.Ip++];
+
+                            List<MondValue> unpackedArgs = null;
+
+                            if (unpackCount > 0)
+                                unpackedArgs = UnpackArgs(MachineState.Code, ref MachineState.Ip, argCount, unpackCount);
+
+                            var returnAddress = PopCall();
+                            var argFrame = returnAddress.Arguments;
+                            var argFrameCount = unpackedArgs?.Count ?? argCount;
+
+                            // make sure we have the correct number of values
+                            if (argFrameCount != argFrame.Values.Length)
+                                argFrame.Values = new MondValue[argFrameCount];
+
+                            // copy arguments into frame
+                            if (unpackedArgs == null)
+                            {
+                                for (var i = argFrameCount - 1; i >= 0; i--)
                                 {
-                                    for (var i = 0; i < argFrameCount; i++)
-                                    {
-                                        argFrame.Values[i] = unpackedArgs[i];
-                                    }
+                                    argFrame.Values[i] = Pop();
                                 }
-
-                                // get rid of old locals
-                                PushLocal(PopLocal().Previous);
-
-                                PushCall(new ReturnAddress(returnAddress.Program, returnAddress.Address, argFrame, _evalStackSize));
-
-                                _ip = address;
-                                break;
                             }
-
-                        case (int)InstructionType.Enter:
+                            else
                             {
-                                var localCount = ReadInt32(_code, ref _ip);
-
-                                var frame = PopLocal();
-                                frame = new Frame(frame?.Depth + 1 ?? 0, frame, localCount);
-
-                                PushLocal(frame);
-                                _locals = frame;
-                                break;
-                            }
-
-                        case (int)InstructionType.Leave:
-                            {
-                                var frame = PopLocal();
-                                frame = frame.Previous;
-
-                                PushLocal(frame);
-                                _locals = frame;
-                                break;
-                            }
-
-                        case (int)InstructionType.Ret:
-                            {
-                                var returnAddress = PopCall();
-                                PopLocal();
-
-                                _program = returnAddress.Program;
-                                _code = _program.Bytecode;
-                                _ip = returnAddress.Address;
-
-                                _args = _callStackSize > 0 ? PeekCall().Arguments : null;
-                                _locals = _localStackSize > 0 ? PeekLocal() : null;
-
-                                if (_callStackSize == _initialCallDepth)
-                                    return Pop();
-
-                                if (Debugger != null && DebuggerCheckReturn())
-                                    DebuggerBreak(_program, _locals, _args, _ip, _initialCallDepth);
-
-                                break;
-                            }
-
-                        case (int)InstructionType.VarArgs:
-                            {
-                                var fixedCount = ReadInt32(_code, ref _ip);
-                                var varArgs = MondValue.Array();
-
-                                for (var i = fixedCount; i < _args.Values.Length; i++)
+                                for (var i = 0; i < argFrameCount; i++)
                                 {
-                                    varArgs.ArrayValue.Add(_args.Values[i]);
+                                    argFrame.Values[i] = unpackedArgs[i];
                                 }
-
-                                _args.Set(_args.Depth, fixedCount, varArgs);
-                                break;
                             }
+
+                            // get rid of old locals
+                            PushLocal(PopLocal().Previous);
+
+                            PushCall(new ReturnAddress(returnAddress.Program, returnAddress.Address, argFrame, _evalStackSize));
+
+                            MachineState.Ip = address;
+                            break;
+                        }
+
+                        case (int) InstructionType.Enter:
+                        {
+                            var localCount = ReadInt32(MachineState.Code, ref MachineState.Ip);
+
+                            var frame = PopLocal();
+                            frame = new Frame(frame?.Depth + 1 ?? 0, frame, localCount);
+
+                            PushLocal(frame);
+                            MachineState.Locals = frame;
+                            break;
+                        }
+
+                        case (int) InstructionType.Leave:
+                        {
+                            var frame = PopLocal();
+                            frame = frame.Previous;
+
+                            PushLocal(frame);
+                            MachineState.Locals = frame;
+                            break;
+                        }
+
+                        case (int) InstructionType.Ret:
+                        {
+                            var returnAddress = PopCall();
+                            PopLocal();
+
+                            MachineState.Program = returnAddress.Program;
+                            MachineState.Code = MachineState.Program.Bytecode;
+                            MachineState.Ip = returnAddress.Address;
+
+                            MachineState.Args = _callStackSize > 0 ? PeekCall().Arguments : null;
+                            MachineState.Locals = _localStackSize > 0 ? PeekLocal() : null;
+
+                            if (_callStackSize == MachineState.InitialCallDepth)
+                                return Pop();
+
+                            if (Debugger != null && DebuggerCheckReturn())
+                                DebuggerBreak(MachineState.Program, MachineState.Locals, MachineState.Args, MachineState.Ip, MachineState.InitialCallDepth);
+
+                            break;
+                        }
+
+                        case (int) InstructionType.VarArgs:
+                        {
+                            var fixedCount = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            var varArgs = MondValue.Array();
+
+                            for (var i = fixedCount; i < MachineState.Args.Values.Length; i++)
+                            {
+                                varArgs.ArrayValue.Add(MachineState.Args.Values[i]);
+                            }
+
+                            MachineState.Args.Set(MachineState.Args.Depth, fixedCount, varArgs);
+                            break;
+                        }
+
                         #endregion
 
                         #region Branching
-                        case (int)InstructionType.Jmp:
+
+                        case (int) InstructionType.Jmp:
+                        {
+                            var address = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            MachineState.Ip = address;
+                            break;
+                        }
+
+                        case (int) InstructionType.JmpTrueP:
+                        {
+                            var address = ReadInt32(MachineState.Code, ref MachineState.Ip);
+
+                            if (Peek())
+                                MachineState.Ip = address;
+
+                            break;
+                        }
+
+                        case (int) InstructionType.JmpFalseP:
+                        {
+                            var address = ReadInt32(MachineState.Code, ref MachineState.Ip);
+
+                            if (!Peek())
+                                MachineState.Ip = address;
+
+                            break;
+                        }
+
+                        case (int) InstructionType.JmpTrue:
+                        {
+                            var address = ReadInt32(MachineState.Code, ref MachineState.Ip);
+
+                            if (Pop())
+                                MachineState.Ip = address;
+
+                            break;
+                        }
+
+                        case (int) InstructionType.JmpFalse:
+                        {
+                            var address = ReadInt32(MachineState.Code, ref MachineState.Ip);
+
+                            if (!Pop())
+                                MachineState.Ip = address;
+
+                            break;
+                        }
+
+                        case (int) InstructionType.JmpTable:
+                        {
+                            var start = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                            var count = ReadInt32(MachineState.Code, ref MachineState.Ip);
+
+                            var endIp = MachineState.Ip + count * 4;
+
+                            var value = Pop();
+                            if (value.Type == MondValueType.Number)
                             {
-                                var address = ReadInt32(_code, ref _ip);
-                                _ip = address;
-                                break;
-                            }
+                                var number = (double) value;
+                                var numberInt = (int) number;
 
-                        case (int)InstructionType.JmpTrueP:
-                            {
-                                var address = ReadInt32(_code, ref _ip);
-
-                                if (Peek())
-                                    _ip = address;
-
-                                break;
-                            }
-
-                        case (int)InstructionType.JmpFalseP:
-                            {
-                                var address = ReadInt32(_code, ref _ip);
-
-                                if (!Peek())
-                                    _ip = address;
-
-                                break;
-                            }
-
-                        case (int)InstructionType.JmpTrue:
-                            {
-                                var address = ReadInt32(_code, ref _ip);
-
-                                if (Pop())
-                                    _ip = address;
-
-                                break;
-                            }
-
-                        case (int)InstructionType.JmpFalse:
-                            {
-                                var address = ReadInt32(_code, ref _ip);
-
-                                if (!Pop())
-                                    _ip = address;
-
-                                break;
-                            }
-
-                        case (int)InstructionType.JmpTable:
-                            {
-                                var start = ReadInt32(_code, ref _ip);
-                                var count = ReadInt32(_code, ref _ip);
-
-                                var endIp = _ip + count * 4;
-
-                                var value = Pop();
-                                if (value.Type == MondValueType.Number)
+                                if (number >= start && number < start + count &&
+                                    Math.Abs(number - numberInt) <= double.Epsilon)
                                 {
-                                    var number = (double)value;
-                                    var numberInt = (int)number;
-
-                                    if (number >= start && number < start + count &&
-                                        Math.Abs(number - numberInt) <= double.Epsilon)
-                                    {
-                                        _ip += (numberInt - start) * 4;
-                                        _ip = ReadInt32(_code, ref _ip);
-                                        break;
-                                    }
+                                    MachineState.Ip += (numberInt - start) * 4;
+                                    MachineState.Ip = ReadInt32(MachineState.Code, ref MachineState.Ip);
+                                    break;
                                 }
-
-                                _ip = endIp;
-                                break;
                             }
+
+                            MachineState.Ip = endIp;
+                            break;
+                        }
+
                         #endregion
 
-                        case (int)InstructionType.Breakpoint:
-                            {
-                                if (Debugger == null)
-                                    break;
-
-                                DebuggerBreak(_program, _locals, _args, _ip, _initialCallDepth);
-
-                                // we stop for the statement *after* the debugger statement so we
-                                // skip the next break opportunity, otherwise we break twice
-                                _debugSkip = true;
+                        case (int) InstructionType.Breakpoint:
+                        {
+                            if (Debugger == null)
                                 break;
-                            }
+
+                            DebuggerBreak(MachineState.Program, MachineState.Locals, MachineState.Args, MachineState.Ip, MachineState.InitialCallDepth);
+
+                            // we stop for the statement *after* the debugger statement so we
+                            // skip the next break opportunity, otherwise we break twice
+                            _debugSkip = true;
+                            break;
+                        }
 
                         default:
                             throw new MondRuntimeException(RuntimeError.UnhandledOpcode);
@@ -970,7 +964,7 @@ namespace Mond.VirtualMachine
                             break;
                         }
                     }
-                    
+
                     // don't show a native transition for wrappers
                     if (!foundWrapper)
                         stackTraceBuilder.AppendLine("[... native ...]");
@@ -981,28 +975,28 @@ namespace Mond.VirtualMachine
                 }
 
                 // first line of the stack trace is where we are running
-                stackTraceBuilder.AppendLine(GetAddressDebugInfo(_program, _errorIp));
+                stackTraceBuilder.AppendLine(GetAddressDebugInfo(MachineState.Program, MachineState.ErrorIp));
 
                 // generate stack trace and reset stacks
-                for (var i = Math.Min(_callStackSize - 1, CallStackCapacity - 1); i > _initialCallDepth; i--)
+                for (var i = Math.Min(_callStackSize - 1, CallStackCapacity - 1); i > MachineState.InitialCallDepth; i--)
                 {
                     var returnAddress = _callStack[i];
                     stackTraceBuilder.AppendLine(GetAddressDebugInfo(returnAddress.Program, returnAddress.Address));
                 }
 
-                _callStackSize = _initialCallDepth;
+                _callStackSize = MachineState.InitialCallDepth;
                 for (var i = _callStackSize; i < CallStackCapacity; i++)
                 {
                     _callStack[i] = default(ReturnAddress);
                 }
 
-                _localStackSize = _initialLocalDepth;
+                _localStackSize = MachineState.InitialLocalDepth;
                 for (var i = _localStackSize; i < CallStackCapacity; i++)
                 {
                     _localStack[i] = default(Frame);
                 }
 
-                _evalStackSize = _initialEvalDepth;
+                _evalStackSize = MachineState.InitialEvalDepth;
                 for (var i = _evalStackSize; i < EvalStackCapacity; i++)
                 {
                     _evalStack[i] = default(MondValue);
@@ -1111,8 +1105,8 @@ namespace Mond.VirtualMachine
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static int ReadInt32(byte[] buffer, ref int offset)
         {
-            return buffer[offset++] <<  0 |
-                   buffer[offset++] <<  8 |
+            return buffer[offset++] << 0 |
+                   buffer[offset++] << 8 |
                    buffer[offset++] << 16 |
                    buffer[offset++] << 24;
         }

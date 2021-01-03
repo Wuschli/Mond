@@ -3,7 +3,7 @@ using System.Collections.Generic;
 
 namespace Mond.VirtualMachine
 {
-    class Frame
+    public class Frame
     {
         public readonly int Depth;
         public readonly Frame Previous;

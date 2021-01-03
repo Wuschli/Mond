@@ -4,12 +4,14 @@ using System.Runtime.CompilerServices;
 using Mond.Debugger;
 using Mond.Libraries;
 using Mond.VirtualMachine;
+using Mond.VirtualMachine.Persistence;
 
 [assembly: InternalsVisibleTo("Mond.Tests")]
 
 namespace Mond
 {
     public delegate MondValue MondFunction(MondState state, params MondValue[] arguments);
+
     public delegate MondValue MondInstanceFunction(MondState state, MondValue instance, params MondValue[] arguments);
 
     public class MondState
@@ -181,6 +183,17 @@ namespace Mond
 
             _prototypeCache.TryGetValue(name, out var value);
             return value;
+        }
+
+        public void Deserialize(IStateSerializer stateSerializer, byte[] serialized)
+        {
+            var machineState = stateSerializer.Deserialize(serialized);
+            _machine.MachineState = machineState;
+        }
+
+        public byte[] Serialize(IStateSerializer stateSerializer)
+        {
+            return stateSerializer.Serialize(_machine.MachineState);
         }
 
         internal bool TryAddPrototype(string name, MondValue value)
